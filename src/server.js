@@ -16,18 +16,37 @@ app.use(express.urlencoded({ extended: true }));
 app.use(router);
 app.use(errorHandler);
 
-await store.init();
-await sessionManager.restoreAll();
-queueService.start();
+let server;
 
-const server = app.listen(config.port, config.host, () => {
-  logger.info({ host: config.host, port: config.port }, 'WA Gateway Service started');
+async function bootstrap() {
+  await store.init();
+  await sessionManager.restoreAll();
+
+  queueService.start();
+
+  server = app.listen(config.port, config.host, () => {
+    logger.info(
+      { host: config.host, port: config.port },
+      'WA Gateway Service started'
+    );
+  });
+}
+
+bootstrap().catch((err) => {
+  logger.error(err);
+  process.exit(1);
 });
 
 async function shutdown(signal) {
   logger.info({ signal }, 'Shutting down');
+
   queueService.stop();
-  server.close(() => process.exit(0));
+
+  if (server) {
+    server.close(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
 }
 
 process.on('SIGINT', shutdown);
