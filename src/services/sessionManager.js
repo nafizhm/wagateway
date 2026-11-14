@@ -10,6 +10,7 @@ import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { store } from '../stores/fileStore.js';
+import { sendIncomingCallback } from './callbackService.js';
 
 export class SessionManager {
   constructor() {
@@ -22,20 +23,30 @@ export class SessionManager {
 
   async restoreAll() {
     const sessions = await store.getSessions();
-    const restorableClientIds = Object.values(sessions)
-      .filter(session => session.status !== 'logged_out')
-      .map(session => session.clientId);
+    const restorableSessions = Object.values(sessions)
+      .filter(session => session.status !== 'logged_out');
 
-    await Promise.all(restorableClientIds.map(clientId => this.create(clientId)));
+    await Promise.all(restorableSessions.map(session => this.create(session.clientId, {
+      incomingCallbackUrl: session.incomingCallbackUrl,
+      incomingCallbackHeaders: session.incomingCallbackHeaders
+    })));
   }
 
-  async create(clientId) {
+  async create(clientId, options = {}) {
     this.assertClientId(clientId);
 
     const existing = this.sessions.get(clientId);
     if (existing?.sock) {
+      await this.applySessionOptions(clientId, existing, options);
       return this.publicSession(clientId, existing);
     }
+
+    const sessions = await store.getSessions();
+    const persisted = sessions[clientId] || {};
+    const sessionOptions = {
+      incomingCallbackUrl: options.incomingCallbackUrl || persisted.incomingCallbackUrl || null,
+      incomingCallbackHeaders: options.incomingCallbackHeaders || persisted.incomingCallbackHeaders || null
+    };
 
     const authDir = this.sessionPath(clientId);
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -59,6 +70,8 @@ export class SessionManager {
       qr: null,
       qrImage: null,
       sock: null,
+      incomingCallbackUrl: sessionOptions.incomingCallbackUrl,
+      incomingCallbackHeaders: sessionOptions.incomingCallbackHeaders,
       createdAt: new Date().toISOString()
     };
     this.sessions.set(clientId, runtime);
@@ -70,10 +83,15 @@ export class SessionManager {
     sock.ev.on('connection.update', update => {
       void this.handleConnectionUpdate(clientId, update);
     });
+    sock.ev.on('messages.upsert', event => {
+      void this.handleMessagesUpsert(clientId, event);
+    });
 
     await store.upsertSession(clientId, {
       status: 'connecting',
       createdAt: runtime.createdAt,
+      incomingCallbackUrl: runtime.incomingCallbackUrl,
+      incomingCallbackHeaders: runtime.incomingCallbackHeaders,
       authDir
     });
 
@@ -81,6 +99,36 @@ export class SessionManager {
     return this.publicSession(clientId, runtime);
   }
 
+
+  async applySessionOptions(clientId, runtime, options = {}) {
+    const patch = {};
+
+    if (options.incomingCallbackUrl) {
+      runtime.incomingCallbackUrl = options.incomingCallbackUrl;
+      patch.incomingCallbackUrl = options.incomingCallbackUrl;
+    }
+
+    if (options.incomingCallbackHeaders) {
+      runtime.incomingCallbackHeaders = options.incomingCallbackHeaders;
+      patch.incomingCallbackHeaders = options.incomingCallbackHeaders;
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await store.upsertSession(clientId, patch);
+    }
+  }
+
+  async handleMessagesUpsert(clientId, event) {
+    const runtime = this.sessions.get(clientId);
+    if (!runtime?.incomingCallbackUrl) {
+      return;
+    }
+
+    const messages = event?.messages || [];
+    await Promise.all(messages
+      .filter(message => message?.message && !message.key?.fromMe)
+      .map(message => sendIncomingCallback(runtime, message)));
+  }
   async handleConnectionUpdate(clientId, update) {
     const runtime = this.sessions.get(clientId);
     if (!runtime) {

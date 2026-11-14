@@ -25,7 +25,10 @@ router.get('/health', asyncHandler(async (req, res) => {
 }));
 
 router.post('/sessions', asyncHandler(async (req, res) => {
-  const session = await sessionManager.create(req.body.clientId);
+  const session = await sessionManager.create(req.body.clientId, {
+    incomingCallbackUrl: req.body.incomingCallbackUrl,
+    incomingCallbackHeaders: req.body.incomingCallbackHeaders
+  });
   res.status(201).json({ ok: true, data: session });
 }));
 
